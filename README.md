@@ -231,27 +231,52 @@ Faites preuve de pédagogie et soyez clair dans vos explications et procedures d
 **Exercice 1 :**  
 Quels sont les composants dont la perte entraîne une perte de données ?  
   
-*..Répondez à cet exercice ici..*
+**Réponse:**
 
+Les composants dont la perte entraîne une perte de données sont :
+
+  - Le PVC pra-data (c'est là où est stockée la base SQLite)
+  - Le PVC pra-backup (si on le perd, on ne peut plus restaurer les données)
 **Exercice 2 :**  
 Expliquez nous pourquoi nous n'avons pas perdu les données lors de la supression du PVC pra-data  
   
-*..Répondez à cet exercice ici..*
+**Réponse:**
+
+On n'a pas perdu les données parce qu'elles étaient sauvegardées automatiquement toutes les minutes dans le PVC pra-backup grâce au CronJob.
+Même si les données PVC ont été supprimées, on a pu restaurer la base de données à partir des sauvegardes.
 
 **Exercice 3 :**  
 Quels sont les RTO et RPO de cette solution ?  
   
-*..Répondez à cet exercice ici..*
+**Réponse:**
+
+RPO (perte de données) : environ 1 minute (car sauvegarde toutes les minutes)
+RTO (temps de reprise) : quelques minutes (le temps de recréer l'infra et restaurer la base)
 
 **Exercice 4 :**  
 Pourquoi cette solution (cet atelier) ne peux pas être utilisé dans un vrai environnement de production ? Que manque-t-il ?   
   
-*..Répondez à cet exercice ici..*
+**Réponse:**
+
+Cette solution ne peut pas être utilisée en production car :
+
+  - Les sauvegardes ne sont pas externalisées (elles sont sur le même cluster)
+  - Il n'y a pas de réplication (si le cluster tombe, tout est perdu)
+  - SQLite n'est pas adapté à un environnement multi-utilisateurs
+  - Pas de haute disponibilité réelle
   
 **Exercice 5 :**  
 Proposez une archtecture plus robuste.   
   
-*..Répondez à cet exercice ici..*
+**Répionse:**
+
+Une architecture plus robuste pourrait être :
+
+  - Une base de données comme PostgreSQL ou MySQL
+  - Des sauvegardes stockées à l'extérieur du cluster (cloud, S3, etc.)
+  - Une réplication des données (multi-zone ou multi-cluster)
+  - Plusieurs pods avec équilibrage de charge
+  - Un système de surveillance et d'alerte
 
 ---------------------------------------------------
 Séquence 6 : Ateliers  
@@ -264,13 +289,72 @@ Difficulté : Moyenne (~2 heures)
 * backup_age_seconds : âge du dernier backup
 
 *..**Déposez ici une copie d'écran** de votre réussite..*
+![alt text](image.png)
 
 ---------------------------------------------------
 ### **Atelier 2 : Choisir notre point de restauration**  
 Aujourd’hui nous restaurobs “le dernier backup”. Nous souhaitons **ajouter la capacité de choisir un point de restauration**.
 
-*..Décrir ici votre procédure de restauration (votre runbook)..*  
-  
+**1. Identification du point de restauration**
+
+Avant toute manipulation, listez les sauvegardes disponibles pour identifier le timestamp souhaité:
+
+```
+kubectl -n pra exec deploy/flask -- ls -lh /backup
+```
+
+**2. Isolation de l'environnement**
+
+Pour garantir l'intégrité de la restauration, on arrête les écritures en coupant l'application et le système de sauvegarde automatique:
+
+```
+# Mise à l'arrêt de l'application
+kubectl -n pra scale deployment flask --replicas=0
+
+# Suspension du CronJob de sauvegarde
+kubectl -n pra patch cronjob sqlite-backup -p '{"spec":{"suspend":true}}'
+```
+**3. Exécution de la restauration manuelle**
+
+Lancez un Pod temporaire pour écraser la base de production par la sauvegarde choisie
+```
+kubectl -n pra run restore-selective --rm -it --image=alpine --overrides='
+{
+  "spec": {
+    "containers": [{
+      "name": "restore",
+      "image": "alpine",
+      "command": ["sh", "-c", "cp /backup/[NOM_DU_FICHIER] /data/app.db && echo Restauration OK"],
+      "volumeMounts": [
+        {"name": "data", "mountPath": "/data"},
+        {"name": "backup", "mountPath": "/backup"}
+      ]
+    }],
+    "volumes": [
+      {"name": "data", "persistentVolumeClaim": {"claimName": "pra-data"}},
+      {"name": "backup", "persistentVolumeClaim": {"claimName": "pra-backup"}}
+    ]
+  }
+}'
+```
+
+**4. Remise en service**
+
+Une fois la restauration terminée, relancez l'application et réactivez les sauvegardes:
+```
+# Redémarrage de l'application
+kubectl -n pra scale deployment flask --replicas=1
+
+# Réactivation des sauvegardes automatiques
+kubectl -n pra patch cronjob sqlite-backup -p '{"spec":{"suspend":false}}'
+```
+**5. Vérification**
+
+Vérifiez que les données correspondent au point de restauration choisi via la route /consultation ou /count de l'application.
+
+
+**Cette procedure permet de faire face à une corruption de données qui aurait pu être sauvegardée. Si une erreur survient à 14h00, la sauvegarde automatique de 14h01 contiendra l'erreur. Cette procédure permet de remonter à 13h59.**
+
 ---------------------------------------------------
 Evaluation
 ---------------------------------------------------
